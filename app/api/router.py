@@ -33,6 +33,13 @@ class ExecuteBody(BaseModel):
     note: str = ""
 
 
+class RefreshForecastBody(BaseModel):
+    new_run_id: int               # 新一轮预报运行 id
+    operator: str = ""
+    role: str = "dispatcher"      # dispatcher 调度员下发新一轮预报
+    note: str = ""
+
+
 class CompleteBody(BaseModel):
     operator: str = ""
     role: str = "transfer_lead"
@@ -240,6 +247,14 @@ def disposal_review(order_id: int, body: ReviewBody, db: Session = Depends(get_d
 def disposal_execute(order_id: int, body: ExecuteBody, db: Session = Depends(get_db)):
     """转移负责人启动执行：转移台账进入转移中。"""
     return disposal_svc.execute_order(db, order_id, body.operator, body.role, body.note)
+
+
+@router.post("/disposals/{order_id}/refresh-forecast")
+def disposal_refresh_forecast(order_id: int, body: RefreshForecastBody,
+                              db: Session = Depends(get_db)):
+    """已审核处置单接收新一轮预报：方案/预警/转移/资源增量调整，保留人工状态。"""
+    return disposal_svc.refresh_forecast(db, order_id, body.new_run_id,
+                                         body.operator, body.role, body.note)
 
 
 @router.post("/disposals/{order_id}/complete")

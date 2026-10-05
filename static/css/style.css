@@ -371,3 +371,31 @@ select option { background: #0a1830; }
 .cov-fill { height: 100%; border-radius: 4px; }
 .cov-fill.ok { background: var(--ok); }
 .cov-fill.gap { background: var(--orange-lv); }
+
+/* 弹窗（接收新一轮预报等） */
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(8, 15, 28, .62);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+.modal {
+  width: 560px; max-width: calc(100vw - 40px); background: var(--panel, #13203a);
+  border: 1px solid rgba(125,149,180,.25); border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0,0,0,.5); overflow: hidden;
+}
+.modal-head {
+  padding: 14px 18px; font-size: 15px; font-weight: 700; color: #e6f0ff;
+  border-bottom: 1px solid rgba(125,149,180,.18);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.modal-close {
+  background: none; border: none; color: #7d95b4; font-size: 22px;
+  line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.modal-close:hover { color: #e6f0ff; }
+.modal-body { padding: 18px; }
+.modal-body select, .modal-body input { width: 100%; box-sizing: border-box; }
+.modal-foot {
+  padding: 12px 18px; display: flex; justify-content: flex-end; gap: 10px;
+  border-top: 1px solid rgba(125,149,180,.18);
+}

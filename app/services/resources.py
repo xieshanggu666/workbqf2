@@ -11,6 +11,9 @@
 (evacuation_records.shelter_id/shelter_name)，同时风险预警进入「处置中」。
 跳过资源协同直接启动执行也允许（兼容既有四态流转与历史处置记录）；
 执行发车、完成归队/入库，闭环后资源份额从「在途占用」释放。
+处置单执行中（executed，如已滚动接收新一轮预报、新增风险区）支持资源
+增量追加：可再分容量/车辆/物资并由指挥员再确认调度令（物资只出增量、
+追加车辆即派即发），但已占用容量/执行中车辆/已出库物资不可撤回。
 """
 from __future__ import annotations
 
@@ -242,13 +245,20 @@ def get_order_resources(db: Session, order: DisposalOrder) -> dict:
 
 
 # ---------------- 通用校验 ----------------
+# 可进行资源分配/调度令操作的处置单状态：
+# approved/resourced 为常规协同阶段；executed 执行中允许「增量追加」
+# （新一轮预报新增风险区时补配容量/运力/物资，已出库物资与执行中车辆不动）。
+RESOURCE_OPEN_STATUSES = ("approved", "resourced", "executed")
+
+
 def _get_order_resources_ready(db: Session, order_id: int) -> DisposalOrder:
     order = db.get(DisposalOrder, order_id)
     if order is None:
         raise HTTPException(404, f"处置单 #{order_id} 不存在")
-    if order.status not in ("approved", "resourced"):
+    if order.status not in RESOURCE_OPEN_STATUSES:
         raise HTTPException(
-            409, "应急资源分配需在预警值守审核通过后进行（处置单须为「待执行/资源已调度」）")
+            409, "应急资源分配需在预警值守审核通过后进行（处置单须为"
+                 "「待执行/资源已调度/执行中」）")
     return order
 
 
@@ -306,6 +316,9 @@ def release_shelter(db: Session, order_id: int, assignment_id: int, role: str) -
     if role != "transfer_lead":
         raise HTTPException(403, "仅转移负责人可调整避难点分配")
     order = _get_order_resources_ready(db, order_id)
+    if order.status == "executed":
+        raise HTTPException(409, "处置已启动执行：占用中的避难容量不可撤回，"
+                                "新一轮预报只需追加分配")
     rec = db.get(ShelterAssignment, assignment_id)
     if rec is None or rec.disposal_id != order.id:
         raise HTTPException(404, "避难点分配记录不存在或不属于该处置单")
@@ -349,7 +362,11 @@ def assign_vehicle(db: Session, order_id: int, body: dict) -> dict:
     rec.shuttles = shuttles
     rec.note = (body.get("note") or "").strip()
     rec.created_by = (body.get("operator") or "").strip() or "物资管理员"
-    if vehicle.status == "standby":
+    if order.status == "executed":
+        # 执行中追加派车：即派即发；正在执行（departed）的车辆状态不动
+        if vehicle.status in ("standby", "dispatched", "returned"):
+            vehicle.status = "departed"
+    elif vehicle.status == "standby":
         vehicle.status = "dispatched"
     db.commit()
     return get_order_resources(db, order)
@@ -359,6 +376,9 @@ def release_vehicle(db: Session, order_id: int, dispatch_id: int, role: str) -> 
     if role != "supply_manager":
         raise HTTPException(403, "仅物资管理员可调整车辆分配")
     order = _get_order_resources_ready(db, order_id)
+    if order.status == "executed":
+        raise HTTPException(409, "处置已启动执行：车辆正在执行任务，不可撤回；"
+                                "新一轮预报如需更多运力请追加派车")
     rec = db.get(VehicleDispatch, dispatch_id)
     if rec is None or rec.disposal_id != order.id:
         raise HTTPException(404, "车辆分配记录不存在或不属于该处置单")
@@ -432,6 +452,8 @@ def release_supply(db: Session, order_id: int, allocation_id: int, role: str) ->
     rec = db.get(SupplyAllocation, allocation_id)
     if rec is None or rec.disposal_id != order.id:
         raise HTTPException(404, "物资分配记录不存在或不属于该处置单")
+    if order.status == "executed" or (rec.issued_quantity or 0) > 0:
+        raise HTTPException(409, "已出库物资不可撤回（执行中仅支持增量追加分配）")
     db.delete(rec)
     db.commit()
     return get_order_resources(db, order)
@@ -447,7 +469,7 @@ def confirm_resources(db: Session, order_id: int, operator: str, role: str,
     order = db.get(DisposalOrder, order_id)
     if order is None:
         raise HTTPException(404, f"处置单 #{order_id} 不存在")
-    if order.status not in ("approved", "resourced"):
+    if order.status not in RESOURCE_OPEN_STATUSES:
         raise HTTPException(409, "须审核通过后才能确认资源调度令")
 
     plan = get_order_resources(db, order)
@@ -508,18 +530,27 @@ def confirm_resources(db: Session, order_id: int, operator: str, role: str,
         if w.status == "active":
             w.status = "handling"
 
-    # 车辆标记已派出
+    # 车辆：未执行时标记已派出；执行中追加车辆即派即发，已发车的不动
     dispatches = db.query(VehicleDispatch).filter(
         VehicleDispatch.disposal_id == order.id).all()
     for d in dispatches:
         v = db.get(Vehicle, d.vehicle_id)
-        if v is not None and v.status in ("standby", "dispatched"):
+        if v is None:
+            continue
+        if order.status == "executed":
+            if v.status in ("standby", "dispatched", "returned"):
+                v.status = "departed"
+        elif v.status in ("standby", "dispatched"):
             v.status = "dispatched"
 
-    order.status = "resourced"
+    # 执行中接收新一轮预报后的增量调度令：处置单状态保持 executed，
+    # 仅追加出库/发车/回写；常规确认则 approved → resourced
+    tag = "[增量资源调度令]" if order.status == "executed" else "[资源调度令]"
+    if order.status != "executed":
+        order.status = "resourced"
     order.resourced_by = (operator or "").strip() or "值班指挥员"
     order.resourced_at = datetime.now()
     if order_text.strip():
-        order.remark = (order.remark + f"\n[资源调度令] {order_text.strip()}").strip()
+        order.remark = (order.remark + f"\n{tag} {order_text.strip()}").strip()
     db.commit()
     return get_order_resources(db, order)

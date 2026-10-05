@@ -42,6 +42,7 @@ const API = {
   reviewDisposal: (id, body) => API.post(`/api/disposals/${id}/review`, body),
   executeDisposal: (id, body) => API.post(`/api/disposals/${id}/execute`, body),
   completeDisposal: (id, body) => API.post(`/api/disposals/${id}/complete`, body),
+  refreshDisposalForecast: (id, body) => API.post(`/api/disposals/${id}/refresh-forecast`, body),
   // 应急资源与避难点协同调度
   shelters: () => API.get("/api/resources/shelters"),
   vehicles: () => API.get("/api/resources/vehicles"),

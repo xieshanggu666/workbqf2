@@ -19,6 +19,11 @@ window.DisposalView = {
       shForm: { evacuation_id: null, shelter_id: null, people: 0 },
       vhForm: { vehicle_id: null, evacuation_id: null, shuttles: 1 },
       spForm: { supply_id: null, evacuation_id: null, quantity: 1 },
+      // 接收新一轮预报
+      refreshOpen: false,
+      refreshRunId: null,
+      refreshNote: "",
+      refreshBusy: false,
     };
   },
   computed: {
@@ -49,9 +54,22 @@ window.DisposalView = {
       this.orders.forEach(o => { map[o.run_id] = o; });
       return this.runs.map(r => ({ ...r, order: map[r.id] || null }));
     },
+    // 当前处置单可接收的新一轮预报：已完成推演、非当前轮次、未挂接其它处置单
+    refreshableRuns() {
+      if (!this.current) return [];
+      return this.runs.filter(r => r.status === "done"
+        && r.id !== this.current.run_id
+        && (!r.disposal || r.disposal.id === this.current.id));
+    },
+    isExecuted() { return this.current && this.current.status === "executed"; },
     res() { return this.current && this.current.resources ? this.current.resources : null; },
     inResourcePhase() {
-      return this.current && ["approved", "resourced"].includes(this.current.status);
+      // executed 执行中仅支持增量追加（新一轮预报新增风险区时补配）
+      return this.current && ["approved", "resourced", "executed"].includes(this.current.status);
+    },
+    canEditResource() {
+      // 执行中只可追加、不可撤回（撤回按钮按行隐藏）
+      return this.inResourcePhase;
     },
     evacMap() {
       const m = {};
@@ -238,13 +256,50 @@ window.DisposalView = {
           operator: this.operatorNames.commander, role: "commander",
           order_text: this.actionNote.trim(),
         });
-        window.app.showToast(`资源调度令已确认（${plan.coverage.shelter_seats} 人位 · ${plan.coverage.vehicle_seats} 座位）`);
+        window.app.showToast(this.isExecuted
+          ? `增量调度令已确认（追加车辆即派即发，物资只出增量）`
+          : `资源调度令已确认（${plan.coverage.shelter_seats} 人位 · ${plan.coverage.vehicle_seats} 座位）`);
         this.actionNote = "";
         await this.load();
         this.current = this.orders.find(o => o.id === this.current.id) || null;
       } catch (e) { window.app.showToast("调度令确认失败：" + e.message); }
     },
     covPct(got, need) { return need > 0 ? Math.min(100, Math.round(got / need * 100)) : 0; },
+    // ---------------- 接收新一轮预报 ----------------
+    canRefresh() {
+      return this.current && this.role === "dispatcher"
+        && ["approved", "resourced", "executed"].includes(this.current.status);
+    },
+    openRefresh() {
+      if (!this.canRefresh()) return;
+      this.refreshRunId = this.refreshableRuns.length ? this.refreshableRuns[0].id : null;
+      this.refreshNote = "";
+      this.refreshOpen = true;
+    },
+    closeRefresh() { this.refreshOpen = false; this.refreshBusy = false; },
+    runLabel(r) {
+      return `#${r.id} ${r.event_name} · ${this.modeText(r.mode)}`;
+    },
+    async submitRefresh() {
+      if (!this.refreshRunId) { window.app.showToast("请选择新一轮预报运行"); return; }
+      this.refreshBusy = true;
+      try {
+        const o = await API.refreshDisposalForecast(this.current.id, {
+          new_run_id: Number(this.refreshRunId),
+          operator: this.operatorNames.dispatcher, role: "dispatcher",
+          note: this.refreshNote.trim(),
+        });
+        const d = o.refresh_delta || {};
+        const w = d.warnings || {}, e = d.evacuations || {};
+        window.app.showToast(
+          `已滚动到第 ${o.round} 轮预报：预警延续${w.carried || 0}/新增${w.added || 0}/解除${w.retired || 0}`
+          + `，转移延续${e.carried || 0}/新增${e.added || 0}/解除${e.retired || 0}；人工状态与已出库物资、执行中车辆保持不变`);
+        this.refreshOpen = false;
+        await this.load();
+        this.current = this.orders.find(x => x.id === o.id) || this.current;
+      } catch (err) { window.app.showToast("接收新一轮预报失败：" + err.message); }
+      finally { this.refreshBusy = false; }
+    },
   },
   mounted() { this.load(); },
   template: `
@@ -341,6 +396,10 @@ window.DisposalView = {
             <button class="btn sm" @click="backToList">← 返回</button>
             <div style="font-size:16px;font-weight:700">处置单 #{{ current.id }} · {{ current.title }}</div>
             <span class="badge" :class="statusBadge(current.status)">{{ current.status_text }}</span>
+            <span class="badge cyan" v-if="current.round > 1">第 {{ current.round }} 轮预报</span>
+            <button v-if="canRefresh()" class="btn sm primary" @click="openRefresh">
+              ↻ 接收新一轮预报
+            </button>
             <span style="margin-left:auto;font-size:12px;color:#7d95b4">
               预报运行 #{{ current.run_id }} · {{ current.event_name }} · {{ current.mode_text }}
             </span>
@@ -381,7 +440,9 @@ window.DisposalView = {
             </div>
             <button v-if="canAct('review')" class="btn primary" @click="act('review')">✓ 审核通过并回写台账</button>
             <button v-if="role==='commander' && inResourcePhase && res && res.evacuations.length"
-                    class="btn primary" @click="confirmOrder">⌘ 确认资源调度令并回写进度</button>
+                    class="btn primary" @click="confirmOrder">
+              ⌘ {{ isExecuted ? '确认增量资源调度令（只出增量）' : '确认资源调度令并回写进度' }}
+            </button>
             <button v-if="canAct('execute')" class="btn primary" @click="act('execute')">▶ 启动转移执行</button>
             <button v-if="canAct('complete')" class="btn primary" @click="act('complete')">✔ 确认完成闭环</button>
             <span v-if="current.status!=='completed' && !(canAct('review')||canAct('execute')||canAct('complete'))
@@ -470,6 +531,9 @@ window.DisposalView = {
                   <input type="number" min="1" v-model.number="shForm.people" placeholder="安置人数"/>
                   <button class="btn sm primary" @click="submitShelter">分配</button>
                 </div>
+                <div v-if="isExecuted && res.evacuations.length" style="font-size:11.5px;color:#ffb061;margin:4px 0">
+                  执行中：仅支持为新一轮预报新增/缺口风险区追加容量，已占用容量不可撤回
+                </div>
                 <table class="grid" style="margin-top:10px">
                   <thead><tr><th>避难点</th><th>服务风险区</th><th>人数</th><th>操作人</th><th></th></tr></thead>
                   <tbody>
@@ -479,7 +543,7 @@ window.DisposalView = {
                       <td class="num">{{ a.people }}</td>
                       <td style="font-size:11.5px;color:#7d95b4">{{ a.created_by }}</td>
                       <td style="text-align:right">
-                        <button v-if="role==='transfer_lead' && inResourcePhase" class="btn xs danger"
+                        <button v-if="role==='transfer_lead' && inResourcePhase && !isExecuted" class="btn xs danger"
                                 @click="releaseRow('shelter', a.id)">撤销</button>
                       </td>
                     </tr>
@@ -510,6 +574,9 @@ window.DisposalView = {
                   <input type="number" min="1" v-model.number="vhForm.shuttles" title="计划往返趟次"/>
                   <button class="btn sm primary" @click="submitVehicle">派车</button>
                 </div>
+                <div v-if="isExecuted && res.evacuations.length" style="font-size:11.5px;color:#ffb061;margin:4px 0">
+                  执行中：追加车辆即派即发，执行中车辆不可撤回
+                </div>
                 <table class="grid" style="margin-top:10px">
                   <thead><tr><th>车辆</th><th>类型</th><th>服务</th><th>趟次</th><th>运力</th><th></th></tr></thead>
                   <tbody>
@@ -520,7 +587,7 @@ window.DisposalView = {
                       <td class="num">{{ d.shuttles }}</td>
                       <td class="num">{{ d.capacity }} 座</td>
                       <td style="text-align:right">
-                        <button v-if="role==='supply_manager' && inResourcePhase" class="btn xs danger"
+                        <button v-if="role==='supply_manager' && inResourcePhase && !isExecuted" class="btn xs danger"
                                 @click="releaseRow('vehicle', d.id)">撤回</button>
                       </td>
                     </tr>
@@ -551,6 +618,9 @@ window.DisposalView = {
                   <input type="number" min="1" v-model.number="spForm.quantity"/>
                   <button class="btn sm primary" @click="submitSupply">分配</button>
                 </div>
+                <div v-if="isExecuted && res.evacuations.length" style="font-size:11.5px;color:#ffb061;margin:4px 0">
+                  执行中：仅支持增量追加，已出库物资不回滚，指挥员再确认时只出增量
+                </div>
                 <table class="grid" style="margin-top:10px">
                   <thead><tr><th>物资</th><th>投向</th><th>数量</th><th>出库状态</th><th></th></tr></thead>
                   <tbody>
@@ -558,9 +628,11 @@ window.DisposalView = {
                       <td>{{ a.supply_name }}</td>
                       <td>{{ a.evacuation_id && evacMap[a.evacuation_id] ? evacMap[a.evacuation_id].zone_name : '公用' }}</td>
                       <td class="num">{{ a.quantity }} {{ a.unit }}</td>
-                      <td><span class="badge" :class="a.issued ? 'green' : 'orange'">{{ a.issued ? '已出库' : '待出库' }}</span></td>
+                      <td><span class="badge" :class="a.issued ? 'green' : 'orange'">{{ a.issued ? '已出库' : '待出库' }}</span>
+                        <span class="badge cyan" v-if="a.issued_quantity > 0 && !a.issued">已出 {{ a.issued_quantity }}</span>
+                      </td>
                       <td style="text-align:right">
-                        <button v-if="role==='supply_manager' && inResourcePhase" class="btn xs danger"
+                        <button v-if="role==='supply_manager' && inResourcePhase && !isExecuted && !a.issued" class="btn xs danger"
                                 @click="releaseRow('supply', a.id)">撤销</button>
                       </td>
                     </tr>
@@ -664,8 +736,73 @@ window.DisposalView = {
               <div v-for="(line, i) in remarks()" :key="i">{{ line }}</div>
             </div>
           </div>
+          <div class="panel" v-if="current.plan && current.plan.rounds && current.plan.rounds.length">
+            <div class="panel-head">预报轮次演进 <span class="tag">第 {{ current.round }} 轮进行中</span></div>
+            <div class="panel-body nopad">
+              <table class="grid">
+                <thead><tr><th>轮次</th><th>降雨情景</th><th>工况</th><th>下游峰值</th><th>削峰率</th><th>拦蓄</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in current.plan.rounds" :key="r.round">
+                    <td><span class="badge gray">第{{ r.round }}轮</span></td>
+                    <td>{{ r.event_name }}</td>
+                    <td>{{ modeText(r.mode) }}</td>
+                    <td class="num mono">{{ fmt.num(r.peak_flow, 0) }}</td>
+                    <td class="num mono">{{ fmt.num(r.peak_ratio, 1) }}%</td>
+                    <td class="num mono">{{ fmt.num(r.storage_gain, 0) }}</td>
+                  </tr>
+                  <tr style="background:rgba(64,158,255,.08)">
+                    <td><span class="badge blue">第{{ current.round }}轮</span></td>
+                    <td>{{ current.event_name }}</td>
+                    <td>{{ current.mode_text }}</td>
+                    <td class="num mono">{{ fmt.num(current.plan.peak_flow, 0) }}</td>
+                    <td class="num mono">{{ fmt.num(current.plan.peak_ratio, 1) }}%</td>
+                    <td class="num mono">{{ fmt.num(current.plan.storage_gain, 0) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </template>
+
+    <!-- 接收新一轮预报弹窗 -->
+    <div v-if="refreshOpen" class="modal-mask" @click.self="closeRefresh">
+      <div class="modal">
+        <div class="modal-head">
+          接收新一轮预报
+          <button class="modal-close" @click="closeRefresh">×</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:12.5px;color:#b9cbe2;line-height:1.9;margin:0 0 12px">
+            将处置单 #{{ current.id }} 滚动绑定到新的预报运行：调度方案滚动更新；
+            预警/转移按站点与风险区<b>增量迁移</b>（等级、峰值、受威胁人数刷新，
+            <b style="color:#7dd3a0">处置中/已销警/转移中/已到位等人工状态保留</b>）；
+            已分配避难点容量沿用，新风险区形成缺口需补配；
+            <b style="color:#7dd3a0">已出库物资不回滚、执行中车辆不动</b>，
+            指挥员再确认调度令时仅出增量。
+          </p>
+          <div class="field">
+            <label>新一轮预报运行</label>
+            <select v-model.number="refreshRunId">
+              <option v-for="r in refreshableRuns" :key="r.id" :value="r.id">{{ runLabel(r) }}</option>
+            </select>
+            <div v-if="!refreshableRuns.length" style="font-size:12px;color:#ff9f43;margin-top:6px">
+              暂无可接收的运行：请先在「洪水预报」执行其它情景/工况推演（当前轮次与已挂接其它处置单的运行不可选）
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label>调度说明（可选）</label>
+            <input v-model="refreshNote" placeholder="如：上游台风路径修正，按新一轮落雨区增补转移"/>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" @click="closeRefresh">取消</button>
+          <button class="btn primary" :disabled="refreshBusy || !refreshRunId" @click="submitRefresh">
+            {{ refreshBusy ? "滚动中…" : "确认接收并增量调整" }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>`,
 };
