@@ -1,0 +1,8 @@
+{
+  "name": "flood-system",
+  "version": "1.0.0",
+  "description": "流域洪水预报与水库群联合调度系统",
+  "scripts": {
+  "dev": "mkdir -p data && rm -f data/flood.db && python scripts/init_db.py && python -m uvicorn app.main:app --host 127.0.0.1 --port 8071"
+}
+}
