@@ -27,6 +27,12 @@ class ReviewBody(BaseModel):
     opinion: str = ""           # 审核意见
 
 
+class RefreshForecastBody(BaseModel):
+    operator: str = ""
+    role: str = "dispatcher"    # dispatcher 调度员接收新一轮预报
+    note: str = ""
+
+
 class ExecuteBody(BaseModel):
     operator: str = ""
     role: str = "transfer_lead"  # transfer_lead 转移负责人
@@ -234,6 +240,14 @@ def disposal_initiate(run_id: int, body: InitiateBody, db: Session = Depends(get
 def disposal_review(order_id: int, body: ReviewBody, db: Session = Depends(get_db)):
     """预警值守审核通过：回写水库工况、预警与转移台账。"""
     return disposal_svc.review_order(db, order_id, body.operator, body.role, body.opinion)
+
+
+@router.post("/disposals/{order_id}/refresh-forecast")
+def disposal_refresh_forecast(order_id: int, body: RefreshForecastBody,
+                              db: Session = Depends(get_db)):
+    """调度员将新一轮预报接入已审核处置单：方案/预警/转移/资源占用增量调整。"""
+    return disposal_svc.refresh_order_forecast(db, order_id, body.operator,
+                                               body.role, body.note)
 
 
 @router.post("/disposals/{order_id}/execute")

@@ -40,6 +40,7 @@ const API = {
   disposal: (id) => API.get(`/api/disposals/${id}`),
   initiateDisposal: (runId, body) => API.post(`/api/disposals/from-run/${runId}`, body),
   reviewDisposal: (id, body) => API.post(`/api/disposals/${id}/review`, body),
+  refreshDisposalForecast: (id, body) => API.post(`/api/disposals/${id}/refresh-forecast`, body),
   executeDisposal: (id, body) => API.post(`/api/disposals/${id}/execute`, body),
   completeDisposal: (id, body) => API.post(`/api/disposals/${id}/complete`, body),
   // 应急资源与避难点协同调度

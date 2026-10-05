@@ -53,6 +53,11 @@ window.DisposalView = {
     inResourcePhase() {
       return this.current && ["approved", "resourced"].includes(this.current.status);
     },
+    canRefresh() {
+      // 已审核未闭环的处置单可由调度员接收新一轮预报（增量调整，状态不变）
+      return this.current && ["approved", "resourced", "executed"].includes(this.current.status)
+             && this.role === "dispatcher";
+    },
     evacMap() {
       const m = {};
       (this.res ? this.res.evacuations : []).forEach(e => { m[e.evacuation_id] = e; });
@@ -244,6 +249,19 @@ window.DisposalView = {
         this.current = this.orders.find(o => o.id === this.current.id) || null;
       } catch (e) { window.app.showToast("调度令确认失败：" + e.message); }
     },
+    async refreshForecast() {
+      const id = this.current.id;
+      try {
+        const o = await API.refreshDisposalForecast(id, {
+          operator: this.operatorNames.dispatcher, role: "dispatcher",
+          note: this.actionNote.trim(),
+        });
+        window.app.showToast(`处置单 #${id} 已接收新一轮预报：方案/台账/资源占用增量调整`);
+        this.actionNote = "";
+        await this.load();
+        this.selectOrder(this.orders.find(x => x.id === id) || o);
+      } catch (e) { window.app.showToast("接收新一轮预报失败：" + e.message); }
+    },
     covPct(got, need) { return need > 0 ? Math.min(100, Math.round(got / need * 100)) : 0; },
   },
   mounted() { this.load(); },
@@ -371,20 +389,21 @@ window.DisposalView = {
 
           <!-- 当前角色待办 -->
           <div style="margin-top:16px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
-            <div class="field" style="flex:1;min-width:260px" v-if="canAct('review')||canAct('execute')||canAct('complete')">
-              <label>{{ canAct('review') ? '审核意见' : canAct('execute') ? '执行说明' : '完成小结' }}（可选）</label>
-              <input v-model="actionNote" :placeholder="canAct('review') ? '如：同意按方案调度，密切监视白水渡水位' : '记录处置情况…'"/>
+            <div class="field" style="flex:1;min-width:260px" v-if="canAct('review')||canAct('execute')||canAct('complete')||canRefresh">
+              <label>{{ canAct('review') ? '审核意见' : canAct('execute') ? '执行说明' : canAct('complete') ? '完成小结' : '新一轮预报备注' }}（可选）</label>
+              <input v-model="actionNote" :placeholder="canAct('review') ? '如：同意按方案调度，密切监视白水渡水位' : canRefresh && !canAct('execute') && !canAct('complete') ? '如：雨量上调，按新一轮预报增量调整' : '记录处置情况…'"/>
             </div>
             <div class="field" style="flex:1;min-width:260px" v-else-if="role==='commander' && inResourcePhase && res && res.evacuations.length">
               <label>资源调度令（可选）</label>
               <input v-model="actionNote" placeholder="如：18:00 前完成转移，物资随车下发"/>
             </div>
             <button v-if="canAct('review')" class="btn primary" @click="act('review')">✓ 审核通过并回写台账</button>
+            <button v-if="canRefresh" class="btn primary" @click="refreshForecast">⇄ 接收新一轮预报</button>
             <button v-if="role==='commander' && inResourcePhase && res && res.evacuations.length"
                     class="btn primary" @click="confirmOrder">⌘ 确认资源调度令并回写进度</button>
             <button v-if="canAct('execute')" class="btn primary" @click="act('execute')">▶ 启动转移执行</button>
             <button v-if="canAct('complete')" class="btn primary" @click="act('complete')">✔ 确认完成闭环</button>
-            <span v-if="current.status!=='completed' && !(canAct('review')||canAct('execute')||canAct('complete'))
+            <span v-if="current.status!=='completed' && !(canAct('review')||canAct('execute')||canAct('complete')||canRefresh)
                          && !(role==='commander' && inResourcePhase && res && res.evacuations.length)"
                   style="font-size:12.5px;color:#7d95b4">
               当前角色（{{ roleText[role] }}）本环节无待办，可切换角色继续流转

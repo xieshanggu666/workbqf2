@@ -13,6 +13,10 @@
 历史预报运行（早期库无调度方案/水库过程线）在发起时自动以
 write_ledgers=False 重算补齐方案快照所需数据，不改动任何历史台账，
 run_id 为 NULL 的历史遗留预警/转移记录原样保留。
+
+已审核（approved/resourced/executed）未闭环的处置单可接收新一轮预报：
+从当前水库工况出发重推演，方案快照、预警、转移与资源占用做增量调整，
+人工处置状态（销警/处置中/转移中/已安全）、已出库物资与执行中车辆均保留。
 """
 from __future__ import annotations
 
@@ -250,6 +254,78 @@ def review_order(db: Session, order_id: int, operator: str, role: str,
         order.reviewed_at = datetime.now()
         if opinion.strip():
             order.remark = (order.remark + f"\n[审核意见] {opinion.strip()}").strip()
+        db.commit()
+        db.refresh(order)
+        return serialize_order(db, order)
+
+
+def refresh_order_forecast(db: Session, order_id: int, operator: str, role: str,
+                           note: str = "") -> dict:
+    """调度员将新一轮预报接入已审核处置单：增量调整，状态机不变。
+
+    新一轮预报从当前水库工况（上轮方案回写结果）出发重推演，随后：
+    - 水库方案：方案快照更新为新一轮结果，各库工况增量调整为新末水位/末库容；
+    - 预警台账：新触发记录增量挂接本单，派生字段随重跑刷新，人工状态
+      （销警/处置中）保留；已过资源调度令的单，新预警直接进入处置中；
+    - 转移台账：新触发记录增量挂接；执行中的单新台账直接联动为转移中，
+      转移中/已安全的人工状态不回退；
+    - 资源占用：既有避难/车辆/物资分配全部保留，已出库数量与库存不动、
+      执行中车辆状态不动；覆盖缺口按新台账自动重算，由后续分配与
+      调度令（approved/resourced 环节）增量补齐。
+    """
+    if role != "dispatcher":
+        raise HTTPException(403, f"仅调度员可接收新一轮预报（当前角色：{ROLE_TEXT.get(role, role)}）")
+    order = db.get(DisposalOrder, order_id)
+    if order is None:
+        raise HTTPException(404, f"处置单 #{order_id} 不存在")
+    if order.status not in ("approved", "resourced", "executed"):
+        raise HTTPException(
+            409, f"处置单当前为「{STATUS_TEXT.get(order.status, order.status)}」，"
+                 f"不能接收新一轮预报（须为「待执行/资源已调度/执行中」）")
+
+    with _order_lock(order.run_id):
+        run = db.get(ForecastRun, order.run_id)
+        event = db.get(RainfallEvent, run.event_id) if run else None
+        if event is None:
+            raise HTTPException(409, f"处置单 #{order_id} 对应的降雨情景已不存在，无法重推演")
+
+        # 新一轮预报推演：台账按幂等键 upsert，人工处置状态保留
+        run_forecast(db, event, reservoir_rule=run.mode, persist=True, write_ledgers=True)
+        db.expire_all()
+
+        # ---- 增量调整 1：水库方案快照与各库工况（新末水位/末库容）----
+        plan = db.query(OperationPlan).filter(OperationPlan.run_id == run.id).first()
+        snapshot = _build_plan_snapshot(db, run, plan)
+        order.plan_snapshot = snapshot
+        for item in snapshot["reservoirs"]:
+            res = db.get(Reservoir, item["id"]) if item["id"] else None
+            if res is not None:
+                res.current_level = item["final_level"]
+                res.current_storage = item["final_storage"]
+
+        # ---- 增量调整 2：预警台账挂接；已过调度令的单新预警进入处置中 ----
+        resourced = order.status == "resourced" or bool(order.resourced_by)
+        warnings = (db.query(WarningRecord)
+                    .filter(WarningRecord.run_id == order.run_id).all())
+        for w in warnings:
+            w.disposal_id = order.id
+            if resourced and w.status == "active":
+                w.status = "handling"
+
+        # ---- 增量调整 3：转移台账挂接；执行中的单新台账联动为转移中 ----
+        evacs = (db.query(EvacuationRecord)
+                 .filter(EvacuationRecord.run_id == order.run_id).all())
+        for ev in evacs:
+            ev.disposal_id = order.id
+            if order.status == "executed" and ev.status == "pending":
+                ev.status = "moving"
+
+        # ---- 增量调整 4：资源占用随新台账自动重算（分配/出库/车辆状态均保留）----
+        actor = operator.strip() or "值班调度员"
+        line = f"[新一轮预报] {actor} 接收新一轮预报，方案/预警/转移/资源占用已增量调整"
+        if note.strip():
+            line += f"：{note.strip()}"
+        order.remark = (order.remark + "\n" + line).strip()
         db.commit()
         db.refresh(order)
         return serialize_order(db, order)
